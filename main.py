@@ -1,9 +1,23 @@
 # Imports
 import numpy as np
 
+# Constants
 # Simulation Parameters
 SIMULATION_TIME = 48000  # (48 seconds in ms)
 NUM_REPLICATIONS = 8
+
+# Event Types
+ARRIVAL = "ARRIVAL"
+DEPARTURE = "DEPARTURE"
+
+
+# Packet Object to pass from Node to Node
+class Packet:
+    def __init__(self, packet_id, arrival_time):
+        self.id = packet_id
+        self.arrival_time = arrival_time
+        self.current_node = 1
+
 
 # Nodes
 def node_1():
@@ -110,12 +124,17 @@ def main():
     """
     Main
     """
+    # Future Event List Stuff
+    current_time = 0.0
+    events = []  
+
     # Define the packet stream.
     
     # Main loop 
 
     # Display results
-    print("Hello World.")
+    packet = Packet(1, 0.0)
+    print(packet.id, packet.arrival_time, packet.current_node)
 
 
 if __name__ == "__main__":
