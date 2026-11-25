@@ -14,7 +14,7 @@ DEPARTURE = "DEPARTURE"
 FEL = []
 
 
-# Packet Object to pass from Node to Node.
+# Packet Class/Obj to pass from Node to Node.
 class Packet:
     def __init__(self, packet_id, arrival_time):
         self.id = packet_id
@@ -22,8 +22,69 @@ class Packet:
         self.current_node = 1
 
 
-# NHPP Arrival Process Generation from Notes (3.4.4) 
+# Node Class to store the properties and current state of each Node.
+class Node:
+    def __init__(self, name, servers, distribution, parameters):
+        self.name = name
+        self.servers = servers
+        self.distribution = distribution
+        self.parameters = parameters
 
+        # To track the number of busy servers.
+        self.busy_servers = 0
+
+        # Queue to store packets waiting for service.
+        self.queue = []
+
+    def generate_service_time(self):
+        """
+        Generate a service time based on the Node's distribution.
+        """
+        if self.distribution == "lognormal":
+            mu, sigma = self.parameters
+            return np.random.lognormal(mu, sigma)
+
+        elif self.distribution == "exponential":
+            lam = self.parameters
+            return np.random.exponential(1 / lam)
+
+        elif self.distribution == "triangular":
+            min_time, mode, max_time = self.parameters
+            return np.random.triangular(min_time, mode, max_time)
+
+        elif self.distribution == "weibull":
+            alpha, beta = self.parameters
+            return beta * np.random.weibull(alpha)
+
+        elif self.distribution == "erlang":
+            k, mean = self.parameters
+            return np.random.gamma(k, mean / k)
+
+        elif self.distribution == "gamma":
+            alpha, beta = self.parameters
+            return np.random.gamma(alpha, beta)
+
+        elif self.distribution == "uniform":
+            min_time, max_time = self.parameters
+            return np.random.uniform(min_time, max_time)
+        
+        else:
+            raise ValueError("Invalid service time distribution.")
+
+
+# Create Nodes 1-7 and store in dictionary, node 8 sink handle in main.
+node1 = Node("Node 1", 3, "lognormal", (4.0, 1.2))
+node2 = Node("Node 2", 2, "exponential", 0.5)
+node3 = Node("Node 3", 4, "triangular", (1.0, 2.0, 4.0))
+node4 = Node("Node 4", 5, "weibull", (1.5, 6.0))
+node5 = Node("Node 5", 3, "erlang", (3, 8.0))
+node6 = Node("Node 6", 1, "gamma", (2.0, 5.0))
+node7 = Node("Node 7", 4, "uniform", (2.0, 5.0))
+
+nodes = {1: node1, 2: node2, 3: node3, 4: node4, 5: node5, 6: node6, 7: node7}
+
+
+# NHPP Arrival Process Generation from Notes (3.4.4) 
 def compensator(t, lam_low, lam_peak, T):
     """
     Compensator function for piecewise NHPP.
@@ -32,13 +93,10 @@ def compensator(t, lam_low, lam_peak, T):
 
     if t < interval:
         return lam_low * t
-
     elif t < 2 * interval:
         return (lam_low * interval) + (lam_peak * (t - interval))
-
     else:
         return (lam_low * interval) + (lam_peak * interval) + (lam_low * (t - 2 * interval))
-
 
 
 def inverse_compensator(t, lam_low, lam_peak, T):
@@ -52,10 +110,8 @@ def inverse_compensator(t, lam_low, lam_peak, T):
 
     if t < first_boundary:
         return t / lam_low
-
     elif t < second_boundary:
         return interval + (t - first_boundary) / lam_peak
-
     else:
         return (2 * interval) + (t - second_boundary) / lam_low
 
@@ -88,7 +144,7 @@ def generate_arrivals(lam_low, lam_peak):
 
     return arrivals
 
-
+# Event Scheduling Function
 def schedule_event(FEL, event_time, event_type, packet, node):
     """
     Add an event to the Future Event List.
@@ -96,136 +152,6 @@ def schedule_event(FEL, event_time, event_type, packet, node):
     event = (event_time, event_type, packet, node)
     FEL.append(event)
     FEL.sort(key=lambda event: event[0])
-
-
-# Nodes, returns a service time following the distribution except Node 8 which is a sink.
-def node_1():
-    """
-    Ingress Edge Router.
-    """
-    # Parameters
-    servers = 3
-    mu = 4.0
-    sigma = 1.2
-
-    # Assumption: mu and sigma represent the underlying normal distribution.
-    service_time = np.random.lognormal(mu, sigma)
-
-    # To Node 2
-
-    return service_time
-
-
-def node_2():
-    """
-    Deep Packet Inspection.
-    """
-    # Parameters
-    servers = 2
-    lam = 0.5
-
-    # Generate exponential service time.
-    service_time = np.random.exponential(1/lam)
-
-    # 90% to Node 3, 10% to Node 6
-
-    return service_time
-
-
-def node_3():
-    """
-    Central Load Balancer.
-    """
-    # Parameters
-    buffer_capacity = 15
-    servers = 4
-    min_time = 1.0
-    mode = 2.0
-    max_time = 4.0
-
-    # Generate triangular service time.
-    service_time = np.random.triangular(min_time, mode, max_time)
-
-    # 60% to Node 4, 40% to Node 5
-    
-    return service_time
-
-
-def node_4():
-    """
-    Compute Cluster A (Standard).
-    """
-    # Parameters
-    servers = 5
-    alpha = 1.5
-    beta = 6.0
-
-    # Generate Weibull service time.
-    service_time = beta * np.random.weibull(alpha)
-
-    # To Node 7
-    
-    return service_time
-
-
-def node_5():
-    """
-    Compute Cluster B (GPU Heavy).
-    """
-    # Parameters
-    servers = 3
-    k = 3
-    mean = 8.0
-
-    # Generate Erlang-k service time.
-    scale = mean / k
-    service_time = np.random.gamma(k, scale)
-
-    # To Node 7
-
-    return service_time
-
-
-def node_6():
-    """
-    Security Quarantine.
-    """
-    # Parameters
-    servers = 1
-    alpha = 2.0
-    beta = 5.0
-
-    # Generate Gamma service time.
-    service_time = np.random.gamma(alpha, beta)
-
-    # To Node 7
-
-    return service_time
-
-
-def node_7():
-    """
-    Database Ingestion.
-    """
-    # Parameters
-    servers = 4
-    min_time = 2.0
-    max_time = 5.0
-
-    # Generate uniform service time.
-    service_time = np.random.uniform(min_time, max_time)
-
-    # To Node 8
-
-    return service_time
-
-
-def node_8():
-    """
-    Sink.
-    """
-    # Report Stats
-    return
 
 
 def main():
@@ -251,14 +177,7 @@ def main():
     # Schedule external arrivals at Node 1.
     for packet_id, arrival_time in enumerate(arrivals, start=1):
         packet = Packet(packet_id, arrival_time)
-
-        schedule_event(
-            FEL,
-            arrival_time,
-            ARRIVAL,
-            packet,
-            1
-        )
+        schedule_event(FEL, arrival_time, ARRIVAL, packet, 1)
 
     # Check FEL.
     print("\nFuture Event List (FEL):")
