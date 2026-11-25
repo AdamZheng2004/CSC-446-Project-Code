@@ -86,18 +86,22 @@ def generate_arrivals(lam_low, lam_peak):
     return arrivals
 
 
-# Nodes
+# Nodes, returns a service time following the distribution except Node 8 which is a sink.
 def node_1():
     """
     Ingress Edge Router.
     """
     # Parameters
     servers = 3
-    service_time = (4.0, 1.2) # Log-Normal
+    mu = 4.0
+    sigma = 1.2
+
+    # Assumption: mu and sigma represent the underlying normal distribution.
+    service_time = np.random.lognormal(mu, sigma)
 
     # To Node 2
 
-    return
+    return service_time
 
 
 def node_2():
@@ -106,11 +110,14 @@ def node_2():
     """
     # Parameters
     servers = 2
-    service_time = (0.5) # Exponential
+    lam = 0.5
+
+    # Generate exponential service time.
+    service_time = np.random.exponential(1/lam)
 
     # 90% to Node 3, 10% to Node 6
 
-    return
+    return service_time
 
 
 def node_3():
@@ -120,11 +127,16 @@ def node_3():
     # Parameters
     buffer_capacity = 15
     servers = 4
-    service_time = (1.0, 2.0, 4.0) # Triangular
+    min_time = 1.0
+    mode = 2.0
+    max_time = 4.0
+
+    # Generate triangular service time.
+    service_time = np.random.triangular(min_time, mode, max_time)
 
     # 60% to Node 4, 40% to Node 5
     
-    return
+    return service_time
 
 
 def node_4():
@@ -133,11 +145,15 @@ def node_4():
     """
     # Parameters
     servers = 5
-    service_time = (1.5, 6.0) # Weibull
+    alpha = 1.5
+    beta = 6.0
+
+    # Generate Weibull service time.
+    service_time = beta * np.random.weibull(alpha)
 
     # To Node 7
     
-    return
+    return service_time
 
 
 def node_5():
@@ -146,23 +162,33 @@ def node_5():
     """
     # Parameters
     servers = 3
-    service_time = (3, 8.0) # Erlang-k
+    k = 3
+    mean = 8.0
+
+    # Generate Erlang-k service time.
+    scale = mean / k
+    service_time = np.random.gamma(k, scale)
 
     # To Node 7
 
-    return
+    return service_time
 
 
 def node_6():
     """
     Security Quarantine.
     """
+    # Parameters
     servers = 1
-    service_time = (2.0, 5.0) # Gamma
+    alpha = 2.0
+    beta = 5.0
+
+    # Generate Gamma service time.
+    service_time = np.random.gamma(alpha, beta)
 
     # To Node 7
 
-    return
+    return service_time
 
 
 def node_7():
@@ -171,11 +197,15 @@ def node_7():
     """
     # Parameters
     servers = 4
-    service_time = (2.0, 5.0) # Uniform
+    min_time = 2.0
+    max_time = 5.0
+
+    # Generate uniform service time.
+    service_time = np.random.uniform(min_time, max_time)
 
     # To Node 8
 
-    return
+    return service_time
 
 
 def node_8():
