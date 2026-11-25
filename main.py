@@ -10,6 +10,9 @@ NUM_REPLICATIONS = 8
 ARRIVAL = "ARRIVAL"
 DEPARTURE = "DEPARTURE"
 
+# FEL
+FEL = []
+
 
 # Packet Object to pass from Node to Node.
 class Packet:
@@ -84,6 +87,15 @@ def generate_arrivals(lam_low, lam_peak):
         arrivals.append(arrival_time)
 
     return arrivals
+
+
+def schedule_event(FEL, event_time, event_type, packet, node):
+    """
+    Add an event to the Future Event List.
+    """
+    event = (event_time, event_type, packet, node)
+    FEL.append(event)
+    FEL.sort(key=lambda event: event[0])
 
 
 # Nodes, returns a service time following the distribution except Node 8 which is a sink.
@@ -220,9 +232,8 @@ def main():
     """
     Main function to run the simulation.
     """
-    # Future Event List Stuff
+    # Initialize simulation.
     current_time = 0.0
-    events = []  
 
     # Define the packet stream.
     # Test with lambda low = 5 packets/sec and lambda peak = 10 packets/sec
@@ -230,15 +241,32 @@ def main():
     lam_peak = 0.010
 
     arrivals = generate_arrivals(lam_low, lam_peak)
-    print("Expected number of arrivals:", compensator(SIMULATION_TIME, lam_low, lam_peak, SIMULATION_TIME))
+
+    # Display arrival information.
+    print("Expected number of arrivals:",compensator(SIMULATION_TIME, lam_low, lam_peak, SIMULATION_TIME))
+    print("Actual number of arrivals:", len(arrivals))
     print("First arrival:", arrivals[0])
     print("Last arrival:", arrivals[-1])
-    
-    # Main loop 
 
-    # Display results
-    packet = Packet(1, 0.0)
-    print(packet.id, packet.arrival_time, packet.current_node)
+    # Schedule external arrivals at Node 1.
+    for packet_id, arrival_time in enumerate(arrivals, start=1):
+        packet = Packet(packet_id, arrival_time)
+
+        schedule_event(
+            FEL,
+            arrival_time,
+            ARRIVAL,
+            packet,
+            1
+        )
+
+    # Check FEL.
+    print("\nFuture Event List (FEL):")
+    print("Number of scheduled events:", len(FEL))
+    print("First scheduled event:", FEL[0])
+    print("Last scheduled event:", FEL[-1])
+
+    # Main event-processing loop.
 
 
 if __name__ == "__main__":
