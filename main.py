@@ -13,6 +13,9 @@ DEPARTURE = "DEPARTURE"
 # Performance Tracking
 node_times = {i: [] for i in range(1, 8)}
 packet_latencies = []
+node3_arrival_attempts = 0
+node3_blocked_packets = 0
+unfinished_node_times = {i: 0.0 for i in range(1, 8)}
 
 # Simulation State
 FEL = []
@@ -39,17 +42,31 @@ class Node:
     """
     To store the properties and current state of each Node.
     """
-    def __init__(self, name, servers, distribution, parameters):
+    def __init__(self, name, servers, distribution, parameters, buffer_capacity=None):
         self.name = name
         self.servers = servers
         self.distribution = distribution
         self.parameters = parameters
-
+        
         # To track the number of busy servers.
         self.busy_servers = 0
 
         # Queue to store packets waiting for service.
         self.queue = []
+        self.queue_area = 0.0
+        self.last_queue_update = 0.0
+
+        # Track server utilization.
+        self.total_busy_time = 0.0
+        self.last_update_time = 0.0
+
+        # Track average number of packets in the Node.
+        self.system_area = 0.0
+        self.last_system_update = 0.0
+
+        # Packets blocked while waiting to enter Node 3.
+        self.buffer_capacity = buffer_capacity
+        self.blocked_upstream = []
 
     def generate_service_time(self):
         """
@@ -85,12 +102,48 @@ class Node:
 
         else:
             raise ValueError("Invalid service time distribution.")
+        
+    def update_queue_length(self, current_time):
+        """
+        Track the time-weighted queue length.
+        """
+        elapsed_time = current_time - self.last_queue_update
+        self.queue_area += len(self.queue) * elapsed_time
+        self.last_queue_update = current_time
+
+    def update_node_busy_time(self, current_time):
+        """
+        Track cumulative busy server time for a Node.
+        """
+        elapsed_time = current_time - self.last_update_time
+        self.total_busy_time += self.busy_servers * elapsed_time
+        self.last_update_time = current_time
+
+    def update_system_length(self, current_time):
+        """
+        Track the time-weighted number of packets in the Node.
+        """
+        elapsed_time = current_time - self.last_system_update
+        self.system_area += (self.busy_servers + len(self.queue)) * elapsed_time
+        self.last_system_update = current_time
+
+    def can_accept_packet(self):
+        """
+        Check whether the Node has room for another packet.
+        """
+        if self.busy_servers < self.servers:
+            return True
+
+        if self.buffer_capacity is None or len(self.queue) < self.buffer_capacity:
+            return True
+
+        return False
 
 
 # Create Nodes 1-7 and store in dictionary, node 8 sink handle in main.
 node1 = Node("Node 1", 3, "lognormal", (4.0, 1.2)) # Assuming that given mu and sigma represent the underlying normal parameters.
 node2 = Node("Node 2", 2, "exponential", 0.5)
-node3 = Node("Node 3", 4, "triangular", (1.0, 2.0, 4.0))
+node3 = Node("Node 3", 4, "triangular", (1.0, 2.0, 4.0), buffer_capacity=15)
 node4 = Node("Node 4", 5, "weibull", (1.5, 6.0))
 node5 = Node("Node 5", 3, "erlang", (3, 8.0))
 node6 = Node("Node 6", 1, "gamma", (2.0, 5.0))
@@ -193,36 +246,72 @@ def handle_arrival(packet, node_id, current_time):
 
     # Record packet arrival time at current Node.
     packet.node_arrival_times[node_id] = current_time
+    node.update_system_length(current_time)
 
-    # Check if a server is available.
+    # Check whether the Node can accept the packet (For Node 3, shouldn't have arrival event when buffer full).
+    if not node.can_accept_packet():
+        raise RuntimeError("Packet arrived at a full Node.")
+
+    # Start service if a server is available.
     if node.busy_servers < node.servers:
+        node.update_node_busy_time(current_time)
         node.busy_servers += 1
         departure_time = current_time + node.generate_service_time()
         schedule_event(FEL, departure_time, DEPARTURE, packet, node_id)
     else:
+        node.update_queue_length(current_time)
         node.queue.append(packet)
 
 
-def handle_departure(packet, node_id, current_time):
+def release_server(node_id, current_time):
     """
-    Handle a packet completing service at a Node, schedules the next arrival event.
+    Release a server and start service for the next queued packet.
     """
     node = nodes[node_id]
+    node.update_node_busy_time(current_time)
+    node.update_system_length(current_time)
     node.busy_servers -= 1
-
-    # Record time spent at this Node.
-    node_times[node_id].append(
-        current_time - packet.node_arrival_times[node_id]
-    )
 
     # Start service for the next queued packet.
     if node.queue:
+        node.update_queue_length(current_time)
         next_packet = node.queue.pop(0)
         node.busy_servers += 1
         departure_time = current_time + node.generate_service_time()
         schedule_event(FEL, departure_time, DEPARTURE, next_packet, node_id)
 
-    # Route completed packet to the next Node.
+    # Check whether Node 3 can now accept blocked packets.
+    if node_id == 3:
+        admit_blocked_packets(current_time)
+
+
+def admit_blocked_packets(current_time):
+    """
+    Admit blocked packets when Node 3 has available capacity.
+    """
+    node3 = nodes[3]
+
+    # Admit blocked packets while Node 3 has capacity.
+    while node3.blocked_upstream and node3.can_accept_packet():
+        packet, upstream_node_id = node3.blocked_upstream.pop(0)
+
+        # Record time spent at the upstream Node.
+        node_times[upstream_node_id].append(current_time - packet.node_arrival_times[upstream_node_id])
+
+        # Admit the packet into Node 3.
+        handle_arrival(packet, 3, current_time)
+
+        # Release the upstream server.
+        release_server(upstream_node_id, current_time)
+
+
+def handle_departure(packet, node_id, current_time):
+    """
+    Handle a packet completing service at a Node.
+    """
+    global node3_arrival_attempts, node3_blocked_packets
+
+    # Determine the next Node.
     if node_id == 1:
         next_node = 2
     elif node_id == 2:
@@ -236,11 +325,35 @@ def handle_departure(packet, node_id, current_time):
     else:
         return
 
-    # Schedule arrival event for the next Node.
-    if next_node == 8:
+    # Count attempts to enter Node 3 and detect blocking.
+    if next_node == 3:
+        node3_arrival_attempts += 1
+
+        if not nodes[3].can_accept_packet():
+            node3_blocked_packets += 1
+
+    # Apply backpressure if Node 3 cannot accept the packet.
+    if next_node == 3 and not nodes[3].can_accept_packet():
+        nodes[3].blocked_upstream.append((packet, node_id))
+        return
+
+    # Record time spent at the current Node.
+    node_times[node_id].append(current_time - packet.node_arrival_times[node_id])
+
+    # Release the current Node's server.
+    release_server(node_id, current_time)
+
+    # Admit the packet into Node 3.
+    if next_node == 3:
+        handle_arrival(packet, 3, current_time)
+
+    # Handle packets reaching the sink.
+    elif next_node == 8:
         packet.current_node = 8
         packet.departure_time = current_time
         packet_latencies.append(packet.departure_time - packet.arrival_time)
+
+    # Schedule arrival at the next Node.
     else:
         packet.current_node = next_node
         schedule_event(FEL, current_time, ARRIVAL, packet, next_node)
@@ -250,58 +363,152 @@ def main():
     """
     Main function to run the simulation.
     """
-    # Initialize simulation, reset trackers.
+    global node3_arrival_attempts, node3_blocked_packets
+
+    # Reset trackers.
+    node3_arrival_attempts = 0
+    node3_blocked_packets = 0
+
     FEL.clear()
     packet_latencies.clear()
 
     for node in nodes.values():
         node.busy_servers = 0
         node.queue.clear()
+        node.blocked_upstream.clear()
+        node.total_busy_time = 0.0
+        node.last_update_time = 0.0
+        node.queue_area = 0.0
+        node.last_queue_update = 0.0
+        node.system_area = 0.0
+        node.last_system_update = 0.0
 
     for times in node_times.values():
         times.clear()
 
-    # Define the packet stream.
+    for node_id in nodes:
+        unfinished_node_times[node_id] = 0.0
+
+    # Generate external arrivals.
     lam_low = 0.005
     lam_peak = 0.010
     arrivals = generate_arrivals(lam_low, lam_peak)
 
-    # Schedule external arrivals at Node 1.
     for packet_id, arrival_time in enumerate(arrivals, start=1):
         packet = Packet(packet_id, arrival_time)
         schedule_event(FEL, arrival_time, ARRIVAL, packet, 1)
 
-    # Process events until the simulation horizon.
+    # Process events until simulation horizon.
     final_time = 0.0
 
     while FEL:
-        event = FEL.pop(0)
-
-        if event[0] > SIMULATION_TIME:
+        if FEL[0][0] > SIMULATION_TIME:
             break
 
+        event = FEL.pop(0)
         process_event(event)
         final_time = event[0]
 
-    # Display basic simulation results.
+    # Track unfinished visits at simulation cutoff.
+    unfinished_counts = {i: 0 for i in range(1, 8)}
+
+    for node_id, node in nodes.items():
+
+        active_packets = list(node.queue)
+
+        # Packets currently receiving service.
+        active_packets += [
+            event[2] for event in FEL
+            if event[1] == DEPARTURE and event[3] == node_id
+        ]
+
+        # Packets blocked at this upstream node.
+        active_packets += [
+            packet for packet, upstream_id in nodes[3].blocked_upstream
+            if upstream_id == node_id
+        ]
+
+        for packet in active_packets:
+            unfinished_node_times[node_id] += (
+                SIMULATION_TIME -
+                packet.node_arrival_times[node_id]
+            )
+            unfinished_counts[node_id] += 1
+
+    # Update performance measurements.
+    for node in nodes.values():
+        node.update_node_busy_time(SIMULATION_TIME)
+        node.update_system_length(SIMULATION_TIME)
+        node.update_queue_length(SIMULATION_TIME)
+
+    # Display results.
     print("\nSimulation Results")
     print("------------------")
-    print("Total external arrivals:", len(arrivals))
+
+    # 1. Network Throughput.
+    throughput = len(packet_latencies) / SIMULATION_TIME
+
+    print("1. Network Throughput:")
     print("Completed packets:", len(packet_latencies))
-    print("Final simulation time:", final_time)
+    print("Throughput:", throughput, "packets/ms")
 
-    # Calculate latency statistics.
+    # 2. End-to-End Latency.
+    print("\n2. End-to-End Latency:")
+
     if packet_latencies:
-        mean_latency = np.mean(packet_latencies)
-        percentile_99 = np.percentile(packet_latencies, 99)
+        print("Mean latency:", np.mean(packet_latencies), "ms")
+        print("99th percentile latency:",
+              np.percentile(packet_latencies, 99), "ms")
 
-        print("Mean end-to-end latency:", mean_latency, "ms")
-        print("99th percentile latency:", percentile_99, "ms")
+    # 3. Node Utilization.
+    print("\n3. Node Utilization:")
 
-    # Display average time spent at each Node.
-    for node_id, times in node_times.items():
-        if times:
-            print(f"Node {node_id} average time: {np.mean(times):.2f} ms")
+    for node_id, node in nodes.items():
+        utilization = node.total_busy_time / (
+            node.servers * SIMULATION_TIME
+        )
+        print(f"Node {node_id} utilization: {utilization * 100:.2f}%")
+
+    # 4. Buffer Congestion.
+    print("\n4. Buffer Congestion:")
+
+    node3 = nodes[3]
+    average_queue_length = node3.queue_area / SIMULATION_TIME
+
+    print("Node 3 average queue length:", average_queue_length)
+
+    if node3_arrival_attempts > 0:
+        blocking_probability = (
+            node3_blocked_packets / node3_arrival_attempts
+        )
+        print("Node 3 blocking probability:",
+              f"{blocking_probability * 100:.2f}%")
+
+    # 5. Little's Law.
+    print("\n5. Little's Law Verification:")
+
+    for node_id, node in nodes.items():
+
+        L = node.system_area / SIMULATION_TIME
+
+        completed_count = len(node_times[node_id])
+        total_visits = completed_count + unfinished_counts[node_id]
+
+        if completed_count > 0:
+
+            arrival_rate = total_visits / SIMULATION_TIME
+            W = sum(node_times[node_id]) / completed_count
+            lambda_W = arrival_rate * W
+
+            print(f"Node {node_id}: L = {L:.4f}, lambda * W = {lambda_W:.4f}, "
+                  f"difference = {abs(L - lambda_W) / L * 100:.2f}%")
+
+        else:
+            print(f"Node {node_id}: No completed visits.")
+
+    print("\nAdditional Information:")
+    print("Total external arrivals:", len(arrivals))
+    print("Final simulation time:", final_time)
 
 
 if __name__ == "__main__":
