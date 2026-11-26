@@ -73,7 +73,7 @@ class Node:
 
 
 # Create Nodes 1-7 and store in dictionary, node 8 sink handle in main.
-node1 = Node("Node 1", 3, "lognormal", (4.0, 1.2))
+node1 = Node("Node 1", 3, "lognormal", (4.0, 1.2)) # Assuming that given mu and sigma represent the underlying normal distribution.
 node2 = Node("Node 2", 2, "exponential", 0.5)
 node3 = Node("Node 3", 4, "triangular", (1.0, 2.0, 4.0))
 node4 = Node("Node 4", 5, "weibull", (1.5, 6.0))
@@ -144,7 +144,8 @@ def generate_arrivals(lam_low, lam_peak):
 
     return arrivals
 
-# Event Scheduling Function
+
+# FEL Setup.
 def schedule_event(FEL, event_time, event_type, packet, node):
     """
     Add an event to the Future Event List.
@@ -153,39 +154,111 @@ def schedule_event(FEL, event_time, event_type, packet, node):
     FEL.append(event)
     FEL.sort(key=lambda event: event[0])
 
+# Event Processing Functions
+def process_event(event):
+    global current_time
+
+    event_time, event_type, packet, node_id = event
+    current_time = event_time
+
+    # Identify event type.
+    if event_type == ARRIVAL:
+        handle_arrival(packet, node_id)
+    elif event_type == DEPARTURE:
+        handle_departure(packet, node_id)
+
+
+def handle_arrival(packet, node_id):
+    node = nodes[node_id]
+
+    # Check if a server is available.
+    if node.busy_servers < node.servers:
+        node.busy_servers += 1
+        departure_time = current_time + node.generate_service_time()
+        schedule_event(FEL, departure_time, DEPARTURE, packet, node_id)
+    else:
+        node.queue.append(packet)
+
+
+def handle_departure(packet, node_id):
+    """
+    Handle a packet completing service at a Node.
+    """
+    node = nodes[node_id]
+    node.busy_servers -= 1
+    global completed_packets
+
+    # Start service for the next queued packet.
+    if node.queue:
+        next_packet = node.queue.pop(0)
+        node.busy_servers += 1
+        departure_time = current_time + node.generate_service_time()
+        schedule_event(FEL, departure_time, DEPARTURE, next_packet, node_id)
+
+    # Route completed packet to the next Node.
+    if node_id == 1:
+        next_node = 2
+    elif node_id == 2:
+        next_node = 3 if np.random.uniform() < 0.90 else 6
+    elif node_id == 3:
+        next_node = 4 if np.random.uniform() < 0.60 else 5
+    elif node_id in (4, 5, 6):
+        next_node = 7
+    elif node_id == 7:
+        next_node = 8
+    else:
+        return
+
+    # Schedule arrival event for the next Node.
+    if next_node == 8:
+        packet.current_node = 8
+        packet.departure_time = current_time
+        completed_packets += 1
+    else:
+        packet.current_node = next_node
+        schedule_event(FEL, current_time, ARRIVAL, packet, next_node)
+
 
 def main():
     """
     Main function to run the simulation.
     """
+    global current_time, completed_packets
+
     # Initialize simulation.
     current_time = 0.0
+    completed_packets = 0
+    FEL.clear()
+
+    for node in nodes.values():
+        node.busy_servers = 0
+        node.queue.clear()
 
     # Define the packet stream.
-    # Test with lambda low = 5 packets/sec and lambda peak = 10 packets/sec
     lam_low = 0.005
     lam_peak = 0.010
-
     arrivals = generate_arrivals(lam_low, lam_peak)
-
-    # Display arrival information.
-    print("Expected number of arrivals:",compensator(SIMULATION_TIME, lam_low, lam_peak, SIMULATION_TIME))
-    print("Actual number of arrivals:", len(arrivals))
-    print("First arrival:", arrivals[0])
-    print("Last arrival:", arrivals[-1])
 
     # Schedule external arrivals at Node 1.
     for packet_id, arrival_time in enumerate(arrivals, start=1):
         packet = Packet(packet_id, arrival_time)
         schedule_event(FEL, arrival_time, ARRIVAL, packet, 1)
 
-    # Check FEL.
-    print("\nFuture Event List (FEL):")
-    print("Number of scheduled events:", len(FEL))
-    print("First scheduled event:", FEL[0])
-    print("Last scheduled event:", FEL[-1])
+    # Process events until the simulation horizon.
+    while FEL:
+        event = FEL.pop(0)
 
-    # Main event-processing loop.
+        if event[0] > SIMULATION_TIME:
+            break
+
+        process_event(event)
+
+    # Display basic simulation results.
+    print("\nSimulation Results")
+    print("------------------")
+    print("Total external arrivals:", len(arrivals))
+    print("Completed packets:", completed_packets)
+    print("Final simulation time:", current_time)
 
 
 if __name__ == "__main__":
