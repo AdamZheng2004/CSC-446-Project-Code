@@ -4,11 +4,12 @@ import numpy as np
 # Constants
 # Simulation Parameters
 SIMULATION_TIME = 48000
-NUM_REPLICATIONS = 8
+NUM_RUNS = 8
 
 # Event Types
 ARRIVAL = "ARRIVAL"
 DEPARTURE = "DEPARTURE"
+SEEDS = [1,2,3,4,5,6,7,8]
 
 # Performance Tracking
 node_times = {i: [] for i in range(1, 8)}
@@ -19,9 +20,6 @@ unfinished_node_times = {i: 0.0 for i in range(1, 8)}
 
 # Simulation State
 FEL = []
-
-# Seed
-np.random.seed(42)
 
 
 # Packet Class.
@@ -359,9 +357,9 @@ def handle_departure(packet, node_id, current_time):
         schedule_event(FEL, current_time, ARRIVAL, packet, next_node)
 
 
-def main():
+def run_simulation():
     """
-    Main function to run the simulation.
+    One run of simulation.
     """
     global node3_arrival_attempts, node3_blocked_packets
 
@@ -429,10 +427,7 @@ def main():
         ]
 
         for packet in active_packets:
-            unfinished_node_times[node_id] += (
-                SIMULATION_TIME -
-                packet.node_arrival_times[node_id]
-            )
+            unfinished_node_times[node_id] += (SIMULATION_TIME -packet.node_arrival_times[node_id])
             unfinished_counts[node_id] += 1
 
     # Update performance measurements.
@@ -441,75 +436,121 @@ def main():
         node.update_system_length(SIMULATION_TIME)
         node.update_queue_length(SIMULATION_TIME)
 
-    # Display results.
-    print("\nSimulation Results")
-    print("------------------")
-
+    # Calculate performance measures.
     # 1. Network Throughput.
     throughput = len(packet_latencies) / SIMULATION_TIME
 
-    print("1. Network Throughput:")
-    print("Completed packets:", len(packet_latencies))
-    print("Throughput:", throughput, "packets/ms")
-
     # 2. End-to-End Latency.
-    print("\n2. End-to-End Latency:")
-
     if packet_latencies:
-        print("Mean latency:", np.mean(packet_latencies), "ms")
-        print("99th percentile latency:",
-              np.percentile(packet_latencies, 99), "ms")
+        mean_latency = np.mean(packet_latencies)
+        p99_latency = np.percentile(packet_latencies, 99)
+    else:
+        mean_latency = 0
+        p99_latency = 0
 
     # 3. Node Utilization.
-    print("\n3. Node Utilization:")
+    utilization = {}
 
     for node_id, node in nodes.items():
-        utilization = node.total_busy_time / (
-            node.servers * SIMULATION_TIME
-        )
-        print(f"Node {node_id} utilization: {utilization * 100:.2f}%")
+        utilization[node_id] = node.total_busy_time / (node.servers * SIMULATION_TIME)
 
     # 4. Buffer Congestion.
-    print("\n4. Buffer Congestion:")
-
     node3 = nodes[3]
     average_queue_length = node3.queue_area / SIMULATION_TIME
 
-    print("Node 3 average queue length:", average_queue_length)
-
     if node3_arrival_attempts > 0:
-        blocking_probability = (
-            node3_blocked_packets / node3_arrival_attempts
-        )
-        print("Node 3 blocking probability:",
-              f"{blocking_probability * 100:.2f}%")
+        blocking_probability = (node3_blocked_packets / node3_arrival_attempts)
+    else:
+        blocking_probability = 0
 
     # 5. Little's Law.
-    print("\n5. Little's Law Verification:")
+    little_law_results = {}
 
     for node_id, node in nodes.items():
-
         L = node.system_area / SIMULATION_TIME
 
         completed_count = len(node_times[node_id])
         total_visits = completed_count + unfinished_counts[node_id]
 
-        if completed_count > 0:
-
+        if total_visits > 0:
             arrival_rate = total_visits / SIMULATION_TIME
-            W = sum(node_times[node_id]) / completed_count
+            total_visit_time = (sum(node_times[node_id]) + unfinished_node_times[node_id])
+            W = total_visit_time / total_visits
             lambda_W = arrival_rate * W
 
-            print(f"Node {node_id}: L = {L:.4f}, lambda * W = {lambda_W:.4f}, "
-                  f"difference = {abs(L - lambda_W) / L * 100:.2f}%")
+            if L > 0:
+                difference = abs(L - lambda_W) / L * 100
+            else:
+                difference = 0
+
+            little_law_results[node_id] = {
+                "L": L,
+                "lambda_W": lambda_W,
+                "difference": difference
+            }
 
         else:
-            print(f"Node {node_id}: No completed visits.")
+            little_law_results[node_id] = None
 
-    print("\nAdditional Information:")
-    print("Total external arrivals:", len(arrivals))
-    print("Final simulation time:", final_time)
+    # Store results to return.
+    results = {
+        "throughput": throughput,
+        "mean_latency": mean_latency,
+        "p99_latency": p99_latency,
+        "utilization": utilization,
+        "node3_average_queue": average_queue_length,
+        "node3_blocking_probability": blocking_probability,
+        "little_law": little_law_results,
+        "completed_packets": len(packet_latencies),
+        "external_arrivals": len(arrivals)
+    }
+
+    return results
+
+
+def main():
+    """
+    Runs the 8 runs of the simulation.
+    """
+    all_results = []
+
+    for run in range(NUM_RUNS):
+        # Set seed, do run, print results.
+        np.random.seed(SEEDS[run])  
+
+        print(f"\nStarting Run {run + 1}")
+
+        results = run_simulation()
+        all_results.append(results)
+        
+        print("1. Network Throughput")
+        print(f"Throughput: {results['throughput']:.4f} packets/ms")
+
+        print("\n2. End-to-End Latency (System Response Time)")
+        print(f"Mean Latency: {results['mean_latency']:.4f} ms")
+        print(f"99th Percentile Latency: {results['p99_latency']:.4f} ms")
+
+        print("\n3. Node Utilization")
+        for node_id, utilization in results["utilization"].items():
+            print(f"Node {node_id}: {utilization * 100:.4f}%")
+
+        print("\n4. Buffer Congestion (Node 3)")
+        print(f"Average Queue Length: {results['node3_average_queue']:.4f}")
+        print(f"Blocking Probability: {results['node3_blocking_probability']:.4f}")
+
+        print("\n5. Little's Law Verification")
+        for node_id, values in results["little_law"].items():
+            print(
+                f"Node {node_id}: "
+                f"L = {values['L']:.4f}, "
+                f"Lambda*W = {values['lambda_W']:.4f}, "
+                f"Difference = {values['difference']:.4f}"
+            )
+
+    print("\nAll runs completed.")
+
+    return all_results
 
 
 if __name__ == "__main__":
-    main()
+    all_results = main()
