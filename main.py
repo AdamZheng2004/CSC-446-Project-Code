@@ -3,27 +3,42 @@ import numpy as np
 
 # Constants
 # Simulation Parameters
-SIMULATION_TIME = 48000  # (48 seconds in ms)
+SIMULATION_TIME = 48000
 NUM_REPLICATIONS = 8
 
 # Event Types
 ARRIVAL = "ARRIVAL"
 DEPARTURE = "DEPARTURE"
 
-# FEL
+# Performance Tracking
+node_times = {i: [] for i in range(1, 8)}
+packet_latencies = []
+
+# Simulation State
 FEL = []
 
+# Seed
+np.random.seed(42)
 
-# Packet Class/Obj to pass from Node to Node.
+
+# Packet Class.
 class Packet:
+    """
+    Obj to pass from Node to Node.
+    """
     def __init__(self, packet_id, arrival_time):
         self.id = packet_id
         self.arrival_time = arrival_time
         self.current_node = 1
+        self.departure_time = None
+        self.node_arrival_times = {}
 
 
-# Node Class to store the properties and current state of each Node.
+# Node Class.
 class Node:
+    """
+    To store the properties and current state of each Node.
+    """
     def __init__(self, name, servers, distribution, parameters):
         self.name = name
         self.servers = servers
@@ -67,13 +82,13 @@ class Node:
         elif self.distribution == "uniform":
             min_time, max_time = self.parameters
             return np.random.uniform(min_time, max_time)
-        
+
         else:
             raise ValueError("Invalid service time distribution.")
 
 
 # Create Nodes 1-7 and store in dictionary, node 8 sink handle in main.
-node1 = Node("Node 1", 3, "lognormal", (4.0, 1.2)) # Assuming that given mu and sigma represent the underlying normal distribution.
+node1 = Node("Node 1", 3, "lognormal", (4.0, 1.2)) # Assuming that given mu and sigma represent the underlying normal parameters.
 node2 = Node("Node 2", 2, "exponential", 0.5)
 node3 = Node("Node 3", 4, "triangular", (1.0, 2.0, 4.0))
 node4 = Node("Node 4", 5, "weibull", (1.5, 6.0))
@@ -84,7 +99,7 @@ node7 = Node("Node 7", 4, "uniform", (2.0, 5.0))
 nodes = {1: node1, 2: node2, 3: node3, 4: node4, 5: node5, 6: node6, 7: node7}
 
 
-# NHPP Arrival Process Generation from Notes (3.4.4) 
+# NHPP Arrival Process Generation from Notes (3.4.4)
 def compensator(t, lam_low, lam_peak, T):
     """
     Compensator function for piecewise NHPP.
@@ -148,28 +163,36 @@ def generate_arrivals(lam_low, lam_peak):
 # FEL Setup.
 def schedule_event(FEL, event_time, event_type, packet, node):
     """
-    Add an event to the Future Event List.
+    Add an event to the FEL.
     """
     event = (event_time, event_type, packet, node)
     FEL.append(event)
     FEL.sort(key=lambda event: event[0])
 
+
 # Event Processing Functions
 def process_event(event):
-    global current_time
-
+    """
+    Process an event from the FEL.
+    """
     event_time, event_type, packet, node_id = event
     current_time = event_time
 
     # Identify event type.
     if event_type == ARRIVAL:
-        handle_arrival(packet, node_id)
+        handle_arrival(packet, node_id, current_time)
     elif event_type == DEPARTURE:
-        handle_departure(packet, node_id)
+        handle_departure(packet, node_id, current_time)
 
 
-def handle_arrival(packet, node_id):
+def handle_arrival(packet, node_id, current_time):
+    """
+    Handle a packet arrival at a Node event.
+    """
     node = nodes[node_id]
+
+    # Record packet arrival time at current Node.
+    packet.node_arrival_times[node_id] = current_time
 
     # Check if a server is available.
     if node.busy_servers < node.servers:
@@ -180,13 +203,17 @@ def handle_arrival(packet, node_id):
         node.queue.append(packet)
 
 
-def handle_departure(packet, node_id):
+def handle_departure(packet, node_id, current_time):
     """
-    Handle a packet completing service at a Node.
+    Handle a packet completing service at a Node, schedules the next arrival event.
     """
     node = nodes[node_id]
     node.busy_servers -= 1
-    global completed_packets
+
+    # Record time spent at this Node.
+    node_times[node_id].append(
+        current_time - packet.node_arrival_times[node_id]
+    )
 
     # Start service for the next queued packet.
     if node.queue:
@@ -213,7 +240,7 @@ def handle_departure(packet, node_id):
     if next_node == 8:
         packet.current_node = 8
         packet.departure_time = current_time
-        completed_packets += 1
+        packet_latencies.append(packet.departure_time - packet.arrival_time)
     else:
         packet.current_node = next_node
         schedule_event(FEL, current_time, ARRIVAL, packet, next_node)
@@ -223,16 +250,16 @@ def main():
     """
     Main function to run the simulation.
     """
-    global current_time, completed_packets
-
-    # Initialize simulation.
-    current_time = 0.0
-    completed_packets = 0
+    # Initialize simulation, reset trackers.
     FEL.clear()
+    packet_latencies.clear()
 
     for node in nodes.values():
         node.busy_servers = 0
         node.queue.clear()
+
+    for times in node_times.values():
+        times.clear()
 
     # Define the packet stream.
     lam_low = 0.005
@@ -245,6 +272,8 @@ def main():
         schedule_event(FEL, arrival_time, ARRIVAL, packet, 1)
 
     # Process events until the simulation horizon.
+    final_time = 0.0
+
     while FEL:
         event = FEL.pop(0)
 
@@ -252,13 +281,27 @@ def main():
             break
 
         process_event(event)
+        final_time = event[0]
 
     # Display basic simulation results.
     print("\nSimulation Results")
     print("------------------")
     print("Total external arrivals:", len(arrivals))
-    print("Completed packets:", completed_packets)
-    print("Final simulation time:", current_time)
+    print("Completed packets:", len(packet_latencies))
+    print("Final simulation time:", final_time)
+
+    # Calculate latency statistics.
+    if packet_latencies:
+        mean_latency = np.mean(packet_latencies)
+        percentile_99 = np.percentile(packet_latencies, 99)
+
+        print("Mean end-to-end latency:", mean_latency, "ms")
+        print("99th percentile latency:", percentile_99, "ms")
+
+    # Display average time spent at each Node.
+    for node_id, times in node_times.items():
+        if times:
+            print(f"Node {node_id} average time: {np.mean(times):.2f} ms")
 
 
 if __name__ == "__main__":
