@@ -1,5 +1,6 @@
 # Imports
 import numpy as np
+from scipy import stats
 
 # Constants
 # Simulation Parameters
@@ -9,7 +10,7 @@ NUM_RUNS = 8
 # Event Types
 ARRIVAL = "ARRIVAL"
 DEPARTURE = "DEPARTURE"
-SEEDS = [1,2,3,4,5,6,7,8]
+SEEDS = [1, 2, 3, 4, 5, 6, 7, 8]
 
 # Performance Tracking
 node_times = {i: [] for i in range(1, 8)}
@@ -20,6 +21,21 @@ unfinished_node_times = {i: 0.0 for i in range(1, 8)}
 
 # Simulation State
 FEL = []
+nodes = {}
+CURRENT_INPUT_STREAM = None
+
+
+# Node Configuration
+# The distributions and parameters stay the same across all scenarios, only change server count.
+NODE_CONFIGS = {
+    1: ("Node 1", "lognormal", (4.0, 1.2), None),
+    2: ("Node 2", "exponential", 0.5, None),
+    3: ("Node 3", "triangular", (1.0, 2.0, 4.0), 15),
+    4: ("Node 4", "weibull", (1.5, 6.0), None),
+    5: ("Node 5", "erlang", (3, 8.0), None),
+    6: ("Node 6", "gamma", (2.0, 5.0), None),
+    7: ("Node 7", "uniform", (2.0, 5.0), None)
+}
 
 
 # Packet Class.
@@ -45,7 +61,7 @@ class Node:
         self.servers = servers
         self.distribution = distribution
         self.parameters = parameters
-        
+
         # To track the number of busy servers.
         self.busy_servers = 0
 
@@ -66,41 +82,41 @@ class Node:
         self.buffer_capacity = buffer_capacity
         self.blocked_upstream = []
 
-    def generate_service_time(self):
+    def generate_service_time(self, rng):
         """
         Generate a service time based on the Node's distribution.
         """
         if self.distribution == "lognormal":
             mu, sigma = self.parameters
-            return np.random.lognormal(mu, sigma)
+            return rng.lognormal(mu, sigma)
 
         elif self.distribution == "exponential":
             lam = self.parameters
-            return np.random.exponential(1 / lam)
+            return rng.exponential(1 / lam)
 
         elif self.distribution == "triangular":
             min_time, mode, max_time = self.parameters
-            return np.random.triangular(min_time, mode, max_time)
+            return rng.triangular(min_time, mode, max_time)
 
         elif self.distribution == "weibull":
             alpha, beta = self.parameters
-            return beta * np.random.weibull(alpha)
+            return beta * rng.weibull(alpha)
 
         elif self.distribution == "erlang":
             k, mean = self.parameters
-            return np.random.gamma(k, mean / k)
+            return rng.gamma(k, mean / k)
 
         elif self.distribution == "gamma":
             alpha, beta = self.parameters
-            return np.random.gamma(alpha, beta)
+            return rng.gamma(alpha, beta)
 
         elif self.distribution == "uniform":
             min_time, max_time = self.parameters
-            return np.random.uniform(min_time, max_time)
+            return rng.uniform(min_time, max_time)
 
         else:
             raise ValueError("Invalid service time distribution.")
-        
+
     def update_queue_length(self, current_time):
         """
         Track the time-weighted queue length.
@@ -138,16 +154,25 @@ class Node:
         return False
 
 
-# Create Nodes 1-7 and store in dictionary, node 8 sink handle in main.
-node1 = Node("Node 1", 3, "lognormal", (4.0, 1.2)) # Assuming that given mu and sigma represent the underlying normal parameters.
-node2 = Node("Node 2", 2, "exponential", 0.5)
-node3 = Node("Node 3", 4, "triangular", (1.0, 2.0, 4.0), buffer_capacity=15)
-node4 = Node("Node 4", 5, "weibull", (1.5, 6.0))
-node5 = Node("Node 5", 3, "erlang", (3, 8.0))
-node6 = Node("Node 6", 1, "gamma", (2.0, 5.0))
-node7 = Node("Node 7", 4, "uniform", (2.0, 5.0))
+# Create Nodes using the server configuration for each scenario.
+def create_nodes(node_setup):
+    """
+    Create a set of Nodes using the supplied server counts.
+    """
+    new_nodes = {}
 
-nodes = {1: node1, 2: node2, 3: node3, 4: node4, 5: node5, 6: node6, 7: node7}
+    for node_id, config in NODE_CONFIGS.items():
+        name, distribution, parameters, buffer_capacity = config
+
+        new_nodes[node_id] = Node(
+            name,
+            node_setup[node_id],
+            distribution,
+            parameters,
+            buffer_capacity
+        )
+
+    return new_nodes
 
 
 # NHPP Arrival Process Generation from Notes (3.4.4)
@@ -182,7 +207,7 @@ def inverse_compensator(t, lam_low, lam_peak, T):
         return (2 * interval) + (t - second_boundary) / lam_low
 
 
-def generate_arrivals(lam_low, lam_peak):
+def generate_arrivals(lam_low, lam_peak, rng):
     """
     Generate NHPP arrival times.
     """
@@ -195,7 +220,7 @@ def generate_arrivals(lam_low, lam_peak):
 
     while True:
         # Step 1: Generate uniform random variable.
-        u = np.random.uniform()
+        u = rng.uniform()
 
         # Step 2: Generate next transformed arrival time.
         t += -np.log(u)
@@ -209,6 +234,57 @@ def generate_arrivals(lam_low, lam_peak):
         arrivals.append(arrival_time)
 
     return arrivals
+
+
+# Generate and save all random inputs for one replication.
+def generate_input_stream(seed):
+    """
+    Generate arrivals, service times and routing decisions for one seed.
+    These inputs are reused across all capacity scenarios.
+    """
+
+    # Generate external arrivals.
+    lam_low = 0.00544
+    lam_peak = 0.01088
+
+    arrival_rng = np.random.default_rng(seed)
+    arrivals = generate_arrivals(lam_low, lam_peak, arrival_rng)
+
+    # Store service times for every packet at every Node.
+    service_times = {}
+
+    for packet_id in range(1, len(arrivals) + 1):
+        service_times[packet_id] = {}
+
+        for node_id, config in NODE_CONFIGS.items():
+            name, distribution, parameters, buffer_capacity = config
+
+            # Use a separate random stream for each packet and Node.
+            service_rng = np.random.default_rng(np.random.SeedSequence([seed, packet_id, node_id, 1]))
+            temporary_node = Node(name, 1, distribution, parameters, buffer_capacity)
+            service_times[packet_id][node_id] = (temporary_node.generate_service_time(service_rng))
+
+    # Store routing decisions for every packet.
+    routing = {}
+
+    for packet_id in range(1, len(arrivals) + 1):
+
+        # Node 2: True means Node 3, False means Node 6.
+        node2_rng = np.random.default_rng(np.random.SeedSequence([seed, packet_id, 2, 2]))
+
+        # Node 3: True means Node 4, False means Node 5.
+        node3_rng = np.random.default_rng(np.random.SeedSequence([seed, packet_id, 3, 2]))
+
+        routing[packet_id] = {
+            2: node2_rng.uniform() < 0.90,
+            3: node3_rng.uniform() < 0.60
+        }
+
+    return {
+        "arrivals": arrivals,
+        "service_times": service_times,
+        "routing": routing
+    }
 
 
 # FEL Setup.
@@ -254,7 +330,9 @@ def handle_arrival(packet, node_id, current_time):
     if node.busy_servers < node.servers:
         node.update_node_busy_time(current_time)
         node.busy_servers += 1
-        departure_time = current_time + node.generate_service_time()
+
+        service_time = CURRENT_INPUT_STREAM["service_times"][packet.id][node_id]
+        departure_time = current_time + service_time
         schedule_event(FEL, departure_time, DEPARTURE, packet, node_id)
     else:
         node.update_queue_length(current_time)
@@ -275,7 +353,10 @@ def release_server(node_id, current_time):
         node.update_queue_length(current_time)
         next_packet = node.queue.pop(0)
         node.busy_servers += 1
-        departure_time = current_time + node.generate_service_time()
+
+        service_time = CURRENT_INPUT_STREAM["service_times"][next_packet.id][node_id]
+        departure_time = current_time + service_time
+
         schedule_event(FEL, departure_time, DEPARTURE, next_packet, node_id)
 
     # Check whether Node 3 can now accept blocked packets.
@@ -313,9 +394,15 @@ def handle_departure(packet, node_id, current_time):
     if node_id == 1:
         next_node = 2
     elif node_id == 2:
-        next_node = 3 if np.random.uniform() < 0.90 else 6
+        if CURRENT_INPUT_STREAM["routing"][packet.id][2]:
+            next_node = 3
+        else:
+            next_node = 6
     elif node_id == 3:
-        next_node = 4 if np.random.uniform() < 0.60 else 5
+        if CURRENT_INPUT_STREAM["routing"][packet.id][3]:
+            next_node = 4
+        else:
+            next_node = 5
     elif node_id in (4, 5, 6):
         next_node = 7
     elif node_id == 7:
@@ -357,11 +444,16 @@ def handle_departure(packet, node_id, current_time):
         schedule_event(FEL, current_time, ARRIVAL, packet, next_node)
 
 
-def run_simulation():
+def run_simulation(node_setup, input_stream):
     """
-    One run of simulation.
+    Run one simulation using the supplied Node configuration and input stream.
     """
+    global nodes, CURRENT_INPUT_STREAM
     global node3_arrival_attempts, node3_blocked_packets
+
+    # Set up the Nodes and random input stream.
+    nodes = create_nodes(node_setup)
+    CURRENT_INPUT_STREAM = input_stream
 
     # Reset trackers.
     node3_arrival_attempts = 0
@@ -370,27 +462,14 @@ def run_simulation():
     FEL.clear()
     packet_latencies.clear()
 
-    for node in nodes.values():
-        node.busy_servers = 0
-        node.queue.clear()
-        node.blocked_upstream.clear()
-        node.total_busy_time = 0.0
-        node.last_update_time = 0.0
-        node.queue_area = 0.0
-        node.last_queue_update = 0.0
-        node.system_area = 0.0
-        node.last_system_update = 0.0
-
     for times in node_times.values():
         times.clear()
 
     for node_id in nodes:
         unfinished_node_times[node_id] = 0.0
 
-    # Generate external arrivals.
-    lam_low = 0.005
-    lam_peak = 0.010
-    arrivals = generate_arrivals(lam_low, lam_peak)
+    # Schedule external arrivals using the saved input stream.
+    arrivals = input_stream["arrivals"]
 
     for packet_id, arrival_time in enumerate(arrivals, start=1):
         packet = Packet(packet_id, arrival_time)
@@ -427,7 +506,7 @@ def run_simulation():
         ]
 
         for packet in active_packets:
-            unfinished_node_times[node_id] += (SIMULATION_TIME -packet.node_arrival_times[node_id])
+            unfinished_node_times[node_id] += (SIMULATION_TIME - packet.node_arrival_times[node_id])
             unfinished_counts[node_id] += 1
 
     # Update performance measurements.
@@ -459,7 +538,7 @@ def run_simulation():
     average_queue_length = node3.queue_area / SIMULATION_TIME
 
     if node3_arrival_attempts > 0:
-        blocking_probability = (node3_blocked_packets / node3_arrival_attempts)
+        blocking_probability = node3_blocked_packets / node3_arrival_attempts
     else:
         blocking_probability = 0
 
@@ -513,7 +592,7 @@ def confidence_interval(values):
     std = np.std(values, ddof=1)
 
     # 95% CI, using DF = 8 runs - 1.
-    t_critical = 2.3646  
+    t_critical = 2.3646
     margin_of_error = t_critical * std / np.sqrt(NUM_RUNS)
 
     lower_bound = mean - margin_of_error
@@ -522,20 +601,15 @@ def confidence_interval(values):
     return mean, lower_bound, upper_bound
 
 
-def main():
+def print_baseline_results(all_results):
     """
-    Runs the 8 runs of the simulation.
+    Print the baseline performance results and confidence intervals.
     """
-    all_results = []
 
-    for run in range(NUM_RUNS):
-        # Set seed, do run, print results.
-        np.random.seed(SEEDS[run])  
+    # Print individual replication results.
+    for run, results in enumerate(all_results, start=1):
 
-        print(f"\nStarting Run {run + 1}")
-
-        results = run_simulation()
-        all_results.append(results)
+        print(f"\nStarting Baseline Run {run}")
 
         print("1. Network Throughput")
         print(f"Throughput: {results['throughput']:.4f} packets/ms")
@@ -554,15 +628,18 @@ def main():
 
         print("\n5. Little's Law Verification")
         for node_id, values in results["little_law"].items():
-            print(
-                f"Node {node_id}: "
-                f"L = {values['L']:.4f}, "
-                f"Lambda*W = {values['lambda_W']:.4f}, "
-                f"Difference = {values['difference']:.4f}"
-            )
+            if values is not None:
+                print(
+                    f"Node {node_id}: "
+                    f"L = {values['L']:.4f}, "
+                    f"Lambda*W = {values['lambda_W']:.4f}, "
+                    f"Difference = {values['difference']:.4f}"
+                )
+            else:
+                print(f"Node {node_id}: No visits recorded.")
 
     # 6. 95% Confidence Intervals
-    print("\n6. 95% Confidence Intervals")
+    print("\n6. Baseline 95% Confidence Intervals")
 
     metrics = {
         "Throughput": "throughput",
@@ -581,12 +658,179 @@ def main():
     for node_id in range(1, 8):
         values = [result["utilization"][node_id] for result in all_results]
         mean, lower, upper = confidence_interval(values)
-        print(f"Node {node_id} Utilization: {mean * 100:.4f}% "
-              f"(95% CI: {lower * 100:.4f}%, {upper * 100:.4f}%)")
 
-    print("\nAll runs completed.")
+        print(
+            f"Node {node_id} Utilization: {mean * 100:.4f}% "
+            f"(95% CI: {lower * 100:.4f}%, {upper * 100:.4f}%)"
+        )
 
-    return all_results
+
+def print_capacity_results(scenario_results):
+    """
+    Print the capacity scenario results and compare the designs using paired t-tests.
+    """
+
+    print("\n========================================")
+    print("CAPACITY PLANNING RESULTS")
+    print("========================================")
+
+    # Print average performance for each scenario.
+    for scenario_name, results in scenario_results.items():
+
+        print(f"\n{scenario_name}")
+
+        metrics = {
+            "Throughput": "throughput",
+            "Mean Latency": "mean_latency",
+            "P99 Latency": "p99_latency",
+            "Node 3 Average Queue": "node3_average_queue",
+            "Node 3 Blocking Probability": "node3_blocking_probability"
+        }
+
+        for label, key in metrics.items():
+            values = [result[key] for result in results]
+            mean, lower, upper = confidence_interval(values)
+
+            print(
+                f"{label}: {mean:.4f} "
+                f"(95% CI: {lower:.4f}, {upper:.4f})"
+            )
+
+        print("Average Node Utilization:")
+
+        for node_id in range(1, 8):
+            values = [
+                result["utilization"][node_id] for result in results
+            ]
+            mean, lower, upper = confidence_interval(values)
+
+            print(
+                f"Node {node_id}: {mean * 100:.4f}% "
+                f"(95% CI: {lower * 100:.4f}%, {upper * 100:.4f}%)"
+            )
+
+    # Compare the proposed design against each alternative.
+    print("\n\nPAIRED T-TESTS: PROPOSED DESIGN VS ALTERNATIVES")
+    print("Metric: 99th Percentile End-to-End Latency")
+    print("Significance level: 0.05")
+
+    proposed_results = scenario_results["Proposed"]
+
+    for alternative_name in [
+        "Alternative 1",
+        "Alternative 2",
+        "Alternative 3"
+    ]:
+
+        alternative_results = scenario_results[alternative_name]
+
+        proposed_p99 = [
+            result["p99_latency"] for result in proposed_results
+        ]
+
+        alternative_p99 = [
+            result["p99_latency"] for result in alternative_results
+        ]
+
+        # Paired differences: Proposed minus Alternative.
+        differences = np.array(proposed_p99) - np.array(alternative_p99)
+
+        test_result = stats.ttest_rel(
+            proposed_p99,
+            alternative_p99
+        )
+
+        mean_difference = np.mean(differences)
+
+        print(f"\nProposed vs {alternative_name}")
+        print(f"Mean paired difference: {mean_difference:.4f} ms")
+        print(f"t-statistic: {test_result.statistic:.4f}")
+        print(f"p-value: {test_result.pvalue:.4f}")
+
+        if test_result.pvalue < 0.05:
+            print("Result: Statistically significant difference.")
+        else:
+            print("Result: No statistically significant difference.")
+
+        if mean_difference < 0:
+            print("The proposed design had lower average P99 latency.")
+        elif mean_difference > 0:
+            print("The alternative had lower average P99 latency.")
+        else:
+            print("The designs had equal average P99 latency.")
+
+
+def main():
+    """
+    Generate common input streams and run the baseline and capacity scenarios.
+    """
+
+    # Baseline Node server configuration.
+    baseline_setup = {1: 3, 2: 2, 3: 4, 4: 5, 5: 3, 6: 1, 7: 4}
+
+    # Four Scenarios with added servers.
+    scenarios = {
+        "Proposed": {1: 5, 2: 2, 3: 4, 4: 5, 5: 3, 6: 1, 7: 4}, # +2 servers at Node 1
+        "Alternative 1": {1: 3, 2: 4, 3: 4, 4: 5, 5: 3, 6: 1, 7: 4}, # +2 servers at Node 2
+        "Alternative 2": {1: 3, 2: 2, 3: 4, 4: 7, 5: 3, 6: 1, 7: 4}, # +2 servers at Node 4
+        "Alternative 3": {1: 4, 2: 2, 3: 4, 4: 6, 5: 3, 6: 1, 7: 4} # +1 server at Node 1 and Node 4
+    }
+
+    # 3. Generate and save the eight common input streams.
+    print("Generating common random input streams...")
+
+    input_streams = {}
+
+    for seed in SEEDS:
+        input_streams[seed] = generate_input_stream(seed)
+
+        print(
+            f"Input stream for seed {seed} generated "
+            f"({len(input_streams[seed]['arrivals'])} arrivals)."
+        )
+
+    # 4. Run the baseline network.
+    print("\nRunning baseline network...")
+
+    baseline_results = []
+
+    for seed in SEEDS:
+        results = run_simulation(
+            baseline_setup,
+            input_streams[seed]
+        )
+
+        baseline_results.append(results)
+
+    # 5. Print baseline results.
+    print_baseline_results(baseline_results)
+
+    # 6. Run the four capacity scenarios using the same input streams.
+    scenario_results = {}
+
+    for scenario_name, node_setup in scenarios.items():
+
+        print(f"\nRunning {scenario_name}...")
+
+        scenario_results[scenario_name] = []
+
+        for seed in SEEDS:
+            results = run_simulation(
+                node_setup,
+                input_streams[seed]
+            )
+
+            scenario_results[scenario_name].append(results)
+
+        print(f"{scenario_name} completed.")
+
+    # 7. Print capacity planning results and paired t-tests.
+    print_capacity_results(scenario_results)
+
+    print("\nAll baseline and capacity experiments completed.")
+
+    return baseline_results, scenario_results
+
 
 if __name__ == "__main__":
-    all_results = main()
+    baseline_results, scenario_results = main()
