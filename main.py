@@ -508,6 +508,20 @@ def run_simulation():
     return results
 
 
+def confidence_interval(values):
+    mean = np.mean(values)
+    std = np.std(values, ddof=1)
+
+    # 95% CI, using DF = 8 runs - 1.
+    t_critical = 2.3646  
+    margin_of_error = t_critical * std / np.sqrt(NUM_RUNS)
+
+    lower_bound = mean - margin_of_error
+    upper_bound = mean + margin_of_error
+
+    return mean, lower_bound, upper_bound
+
+
 def main():
     """
     Runs the 8 runs of the simulation.
@@ -522,7 +536,7 @@ def main():
 
         results = run_simulation()
         all_results.append(results)
-        
+
         print("1. Network Throughput")
         print(f"Throughput: {results['throughput']:.4f} packets/ms")
 
@@ -547,10 +561,32 @@ def main():
                 f"Difference = {values['difference']:.4f}"
             )
 
+    # 6. 95% Confidence Intervals
+    print("\n6. 95% Confidence Intervals")
+
+    metrics = {
+        "Throughput": "throughput",
+        "Mean Latency": "mean_latency",
+        "P99 Latency": "p99_latency",
+        "Node 3 Average Queue": "node3_average_queue",
+        "Node 3 Blocking Probability": "node3_blocking_probability"
+    }
+
+    for label, key in metrics.items():
+        values = [result[key] for result in all_results]
+        mean, lower, upper = confidence_interval(values)
+        print(f"{label}: {mean:.4f} (95% CI: {lower:.4f}, {upper:.4f})")
+
+    # Confidence Intervals for Node Utilization
+    for node_id in range(1, 8):
+        values = [result["utilization"][node_id] for result in all_results]
+        mean, lower, upper = confidence_interval(values)
+        print(f"Node {node_id} Utilization: {mean * 100:.4f}% "
+              f"(95% CI: {lower * 100:.4f}%, {upper * 100:.4f}%)")
+
     print("\nAll runs completed.")
 
     return all_results
-
 
 if __name__ == "__main__":
     all_results = main()
